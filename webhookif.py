@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import time
 from datetime import datetime
 from typing import Optional
 
@@ -51,38 +52,67 @@ storage_client = BlobStorageClient(
 
 
 def dispatch_download(tiquete_download: str, tiquete_solicitacao: str) -> None:
-    """Dispara o serviço de download de forma assíncrona e registra falhas apenas em log."""
+    """Dispara o serviço de download de forma assíncrona com retry automático."""
     logger.info(
         "Disparando download para tiqueteSolicitacao=%s tiqueteDownload=%s",
         tiquete_solicitacao,
         tiquete_download,
     )
 
-    try:
-        with httpx.Client(timeout=30.0) as client:
-            response = client.post(
-                DOWNLOAD_SERVICE_URL,
-                json={"tiqueteDownload": tiquete_download},
-                timeout=120.0,
+    max_retries = 3
+    retry_delay = 2.0
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            with httpx.Client(timeout=30.0) as client:
+                response = client.post(
+                    DOWNLOAD_SERVICE_URL,
+                    json={"tiqueteDownload": tiquete_download},
+                    timeout=120.0,
+                )
+                if response.status_code >= 300:
+                    logger.warning(
+                        "Download service retornou status %s para tiqueteSolicitacao=%s (tentativa %d/%d): %s",
+                        response.status_code,
+                        tiquete_solicitacao,
+                        attempt,
+                        max_retries,
+                        response.text,
+                    )
+                    if attempt < max_retries:
+                        time.sleep(retry_delay)
+                        continue
+                    else:
+                        logger.error(
+                            "Falha definitiva no download após %d tentativas para tiqueteSolicitacao=%s",
+                            max_retries,
+                            tiquete_solicitacao,
+                        )
+                        return
+                else:
+                    logger.info(
+                        "Download service aceitou a requisição para tiqueteSolicitacao=%s (tentativa %d)",
+                        tiquete_solicitacao,
+                        attempt,
+                    )
+                    return
+        except Exception as exc:
+            logger.warning(
+                "Falha ao chamar serviço de download para tiqueteSolicitacao=%s (tentativa %d/%d): %s",
+                tiquete_solicitacao,
+                attempt,
+                max_retries,
+                str(exc),
             )
-            if response.status_code >= 300:
-                logger.warning(
-                    "Download service retornou status %s para tiqueteSolicitacao=%s: %s",
-                    response.status_code,
-                    tiquete_solicitacao,
-                    response.text,
-                )
+            if attempt < max_retries:
+                time.sleep(retry_delay)
+                continue
             else:
-                logger.info(
-                    "Download service aceitou a requisição para tiqueteSolicitacao=%s",
+                logger.exception(
+                    "Falha definitiva no download após %d tentativas para tiqueteSolicitacao=%s",
+                    max_retries,
                     tiquete_solicitacao,
                 )
-    except Exception as exc:
-        logger.exception(
-            "Falha ao chamar serviço de download para tiqueteSolicitacao=%s: %s",
-            tiquete_solicitacao,
-            exc,
-        )
 
 
 @app.head("/webhook")
@@ -127,8 +157,4 @@ async def root() -> dict:
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host="0.0.0.0", port=8000)
-
-if __name__ == "__main__":
-    import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)

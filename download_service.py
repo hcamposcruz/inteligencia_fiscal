@@ -11,6 +11,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field, validator
 
 from storage_client import BlobStorageClient
+from token import get_access_token
 
 logger = logging.getLogger("download_service")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -55,10 +56,10 @@ class DownloadWorker:
         """Monta a URL de download da Receita Federal a partir do ticket."""
         return self.download_url_template.format(tiquete_download=tiquete_download)
 
-    def fetch_metadata(self, client: httpx.Client, url: str) -> Dict[str, Optional[str]]:
+    def fetch_metadata(self, client: httpx.Client, url: str, headers: Dict[str, str]) -> Dict[str, Optional[str]]:
         """Tenta descobrir se o servidor suporta downloads em range e o tamanho total."""
         try:
-            response = client.head(url, timeout=60.0)
+            response = client.head(url, headers=headers, timeout=60.0)
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code in {405, 501}:
@@ -74,7 +75,7 @@ class DownloadWorker:
                 "content_md5": response.headers.get("content-md5"),
             }
 
-        with client.stream("GET", url, timeout=60.0) as response:
+        with client.stream("GET", url, headers=headers, timeout=60.0) as response:
             response.raise_for_status()
             return {
                 "content_length": response.headers.get("content-length"),
@@ -89,44 +90,50 @@ class DownloadWorker:
         logger.info("Iniciando download para ticket %s -> %s", tiquete_download, blob_path)
 
         start_time = time.time()
+        access_token = get_access_token()
+        auth_headers = {"Authorization": f"Bearer {access_token}"}
+
         client = httpx.Client(follow_redirects=True)
-        metadata = self.fetch_metadata(client, url)
-        content_length = int(metadata["content_length"]) if metadata.get("content_length") else None
-        accept_ranges = metadata.get("accept_ranges") or "none"
-        expected_md5 = metadata.get("content_md5")
+        try:
+            metadata = self.fetch_metadata(client, url, auth_headers)
+            content_length = int(metadata["content_length"]) if metadata.get("content_length") else None
+            accept_ranges = metadata.get("accept_ranges") or "none"
+            expected_md5 = metadata.get("content_md5")
 
-        if accept_ranges.lower() == "bytes" and content_length and content_length > self.CHUNK_SIZE:
-            logger.info("Servidor suporta Range downloads; usando lógica chunked")
-            downloaded_bytes, computed_md5 = self.download_with_range(client, url, blob_path, content_length)
-        else:
-            logger.info("Fazendo download em streaming sem Range");
-            downloaded_bytes, computed_md5 = self.download_stream(client, url, blob_path)
+            if accept_ranges.lower() == "bytes" and content_length and content_length > self.CHUNK_SIZE:
+                logger.info("Servidor suporta Range downloads; usando lógica chunked")
+                downloaded_bytes, computed_md5 = self.download_with_range(client, url, blob_path, content_length, auth_headers)
+            else:
+                logger.info("Fazendo download em streaming sem Range")
+                downloaded_bytes, computed_md5 = self.download_stream(client, url, blob_path, auth_headers)
 
-        duration = time.time() - start_time
-        logger.info("Download concluído para %s (%d bytes, %.2f s)", tiquete_download, downloaded_bytes, duration)
+            duration = time.time() - start_time
+            logger.info("Download concluído para %s (%d bytes, %.2f s)", tiquete_download, downloaded_bytes, duration)
 
-        if expected_md5:
-            logger.info("Hash MD5 esperado: %s", expected_md5)
-            if computed_md5 and computed_md5 != expected_md5:
-                raise ValueError("Validação MD5 falhou: conteúdo baixado não confere com cabeçalho esperado")
+            if expected_md5:
+                logger.info("Hash MD5 esperado: %s", expected_md5)
+                if computed_md5 and computed_md5 != expected_md5:
+                    raise ValueError("Validação MD5 falhou: conteúdo baixado não confere com cabeçalho esperado")
 
-        return DownloadResponse(
-            status="completed",
-            message="Download concluído com sucesso",
-            blob_path=blob_path,
-            downloaded_bytes=downloaded_bytes,
-            content_md5=computed_md5,
-            duration_seconds=duration,
-        )
+            return DownloadResponse(
+                status="completed",
+                message="Download concluído com sucesso",
+                blob_path=blob_path,
+                downloaded_bytes=downloaded_bytes,
+                content_md5=computed_md5,
+                duration_seconds=duration,
+            )
+        finally:
+            client.close()
 
-    def download_stream(self, client: httpx.Client, url: str, blob_path: str) -> tuple[int, Optional[str]]:
+    def download_stream(self, client: httpx.Client, url: str, blob_path: str, headers: Dict[str, str]) -> tuple[int, Optional[str]]:
         blob_client = self.storage_client.container_client.get_blob_client(blob_path)
         hasher = hashlib.md5()
         total_bytes = 0
 
         def content_generator() -> Iterable[bytes]:
             nonlocal total_bytes
-            with client.stream("GET", url, timeout=120.0) as response:
+            with client.stream("GET", url, headers=headers, timeout=120.0) as response:
                 response.raise_for_status()
                 for chunk in response.iter_bytes(self.CHUNK_SIZE):
                     if not chunk:
@@ -140,7 +147,7 @@ class DownloadWorker:
         self.storage_client.upload_stream(blob_path, content_generator())
         return total_bytes, hasher.hexdigest()
 
-    def download_with_range(self, client: httpx.Client, url: str, blob_path: str, content_length: int) -> tuple[int, Optional[str]]:
+    def download_with_range(self, client: httpx.Client, url: str, blob_path: str, content_length: int, headers: Dict[str, str]) -> tuple[int, Optional[str]]:
         blob_client = self.storage_client.container_client.get_blob_client(blob_path)
         hasher = hashlib.md5()
         block_ids = []
@@ -151,7 +158,8 @@ class DownloadWorker:
             end = min(start + self.CHUNK_SIZE - 1, content_length - 1)
             range_header = {"Range": f"bytes={start}-{end}"}
             logger.debug("Solicitando range %s", range_header["Range"])
-            with client.stream("GET", url, headers=range_header, timeout=120.0) as response:
+            request_headers = {**headers, **range_header}
+            with client.stream("GET", url, headers=request_headers, timeout=120.0) as response:
                 if response.status_code not in {200, 206}:
                     raise httpx.HTTPStatusError("Resposta inesperada para range", request=response.request, response=response)
 

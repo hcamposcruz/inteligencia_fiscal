@@ -1,9 +1,14 @@
 import base64
 import json
+import logging
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+logger = logging.getLogger("token_service")
 
 TOKEN_URL = "https://api.receitafederal.gov.br/token"
+APURACAO_URL = "https://api.receitafederal.gov.br/rtc/apuracao-cbs/v1/02558157"
 
 client_id = "gmX2kvgBXg4Ty3bco0MlCWY9xfyDwpS9"
 client_secret = "T8NJ4rnhXwIxZE0qxwb3cvi9Do5KdhU8"
@@ -22,84 +27,81 @@ def generate_basic_auth(client_id: str, client_secret: str) -> str:
 
 
 def get_access_token() -> str:
-    
-    ##Realiza a chamada da API da Receita Federal para obter o token
+    """Realiza a chamada da API da Receita Federal para obter o token de acesso."""
 
     try:
         auth_header = generate_basic_auth(client_id, client_secret)
         headers = {
             "Content-Type": "application/json",
-            "Authorization": auth_header
+            "Authorization": auth_header,
         }
 
-        paylod = {
+        payload = {
             "grant_type": "client_credentials"
         }
 
-        response = requests.post(
-            TOKEN_URL, 
-            headers=headers, 
-            json=paylod,
-            timeout=30)
-        
-        ## Log 
-        print(f"Status code: {response.status_code}")
+        response = requests.post(TOKEN_URL, headers=headers, json=payload, timeout=30)
+        logger.info(f"Status code do token: {response.status_code}")
 
         if response.status_code != 200:
             raise Exception(f"Erro ao obter token da Receita: {response.status_code} - {response.text}")
-        
+
         token_data = response.json()
-        token_data["generated_at"] = datetime.now().isoformat()
-        return token_data
-    
+        access_token = token_data.get("access_token")
+        if not access_token:
+            raise RuntimeError("Token de acesso não encontrado na resposta da API de token.")
+
+        logger.info("Token obtido com sucesso")
+        return access_token
     except Exception as e:
+        logger.exception(f"Falha ao obter token da Receita: {str(e)}")
         raise RuntimeError(f"Falha ao obter token da Receita: {str(e)}")
     
 
 
-## Realizando chamada API Receita Federal e obtendo o Token
-token_response = get_access_token()
+def request_apuracao(url_retorno: str) -> dict:
+    """Faz a chamada à API de apuração usando o token de acesso."""
+    try:
+        access_token = get_access_token()
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {access_token}",
+        }
+        payload = {
+            "urlRetorno": url_retorno
+        }
 
-print("Token obtido com sucesso:")
-print(json.dumps(token_response, indent=2))
+        response = requests.post(APURACAO_URL, headers=headers, json=payload, timeout=30)
+        logger.info(f"Status code da apuração: {response.status_code}")
 
-# Extrair o token de acesso
-access_token = token_response.get("access_token")
-if not access_token:
-    raise RuntimeError("Token de acesso não encontrado na resposta.")
+        try:
+            response_data = response.json()
+        except ValueError:
+            response_data = {"text": response.text}
 
-# URL da API de apuração CBS
-APURACAO_URL = "https://api.receitafederal.gov.br/rtc/apuracao-cbs/v1/02558157"
+        if response.status_code != 200:
+            logger.error(f"Erro ao chamar API de apuração: {response.status_code} - {response.text}")
+            raise RuntimeError(
+                f"Erro ao chamar API de apuração: {response.status_code} - {response.text}"
+            )
 
-# Headers para a chamada de apuração
-headers_apuracao = {
-    "Content-Type": "application/json",
-    "Authorization": f"Bearer {access_token}"
-}
+        logger.info("Apuração solicitada com sucesso")
+        return response_data
+    except Exception as e:
+        logger.exception(f"Falha ao chamar API de apuração: {str(e)}")
+        raise
 
-# Payload para a chamada de apuração
-payload_apuracao = {
-    "urlRetorno": "https://colonize-relative-discuss.ngrok-free.dev/webhook"
-}
 
-# Fazer a chamada POST para a API de apuração
-try:
-    response_apuracao = requests.post(
-        APURACAO_URL,
-        headers=headers_apuracao,
-        json=payload_apuracao,
-        timeout=30
-    )
-    
-    print(f"Status code da apuração: {response_apuracao.status_code}")
-    
-    if response_apuracao.status_code == 200:
-        print("Apuração solicitada com sucesso.")
-        print("Resposta:")
-        print(json.dumps(response_apuracao.json(), indent=2))
-    else:
-        print(f"Erro na apuração: {response_apuracao.status_code} - {response_apuracao.text}")
-        
-except Exception as e:
-    print(f"Falha ao chamar API de apuração: {str(e)}")
+if __name__ == "__main__":
+    logger.info("Obtendo token de acesso...")
+    try:
+        token = get_access_token()
+        logger.info("Token obtido com sucesso.")
+        logger.info(json.dumps({"access_token": token}, indent=2))
+
+        logger.info("Chamando API de apuração...")
+        apuracao_result = request_apuracao("https://colonize-relative-discuss.ngrok-free.dev/webhook")
+        logger.info("Resposta da apuração: %s", json.dumps(apuracao_result, indent=2))
+    except Exception as e:
+        logger.error(f"Erro na execução principal: {str(e)}")
 
