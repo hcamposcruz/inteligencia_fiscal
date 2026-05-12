@@ -35,7 +35,7 @@ class WebhookPayload(BaseModel):
 
 AZURE_STORAGE_CONNECTION_STRING = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
 CONTAINER_NAME = os.getenv("BLOB_CONTAINER_NAME", "beintegracoes")
-DOWNLOAD_SERVICE_URL = os.getenv("DOWNLOAD_SERVICE_URL", "http://127.0.0.1:8001/download/arquivogov")
+DOWNLOAD_SERVICE_URL = os.getenv("DOWNLOAD_SERVICE_URL", "http://127.0.0.1:8001/download")
 
 if not AZURE_STORAGE_CONNECTION_STRING:
     raise RuntimeError(
@@ -85,6 +85,13 @@ def dispatch_download(tiquete_download: str, tiquete_solicitacao: str) -> None:
         )
 
 
+@app.head("/webhook")
+async def webhook_health_check() -> None:
+    """Endpoint HEAD para validar que o webhook está ativo. Retorna 200 OK."""
+    logger.info("Verificação de saúde do webhook (HEAD) realizada")
+    return
+
+
 @app.post("/webhook")
 async def receive_webhook(payload: WebhookPayload, background_tasks: BackgroundTasks) -> dict:
     """Recebe o webhook, salva o payload no Blob Storage e agenda o download."""
@@ -109,6 +116,7 @@ async def receive_webhook(payload: WebhookPayload, background_tasks: BackgroundT
     except Exception as exc:
         logger.exception("Erro ao processar webhook para tiqueteSolicitacao=%s", payload.tiqueteSolicitacao)
         raise HTTPException(status_code=500, detail=f"Erro ao processar webhook: {str(exc)}")
+
 
 
 @app.get("/")
