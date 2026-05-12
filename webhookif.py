@@ -2,7 +2,6 @@ import json
 import logging
 import os
 import time
-from datetime import datetime
 from typing import Optional
 
 import httpx
@@ -124,22 +123,18 @@ async def webhook_health_check() -> None:
 
 @app.post("/webhook")
 async def receive_webhook(payload: WebhookPayload, background_tasks: BackgroundTasks) -> dict:
-    """Recebe o webhook, salva o payload no Blob Storage e agenda o download."""
+    """Recebe o webhook, valida o payload e agenda o download."""
     try:
-        payload_data = {
-            "tiqueteSolicitacao": payload.tiqueteSolicitacao,
-            "tiqueteDownload": payload.tiqueteDownload,
-            "metadata": payload.metadata,
-            "received_at": datetime.utcnow().isoformat() + "Z",
-        }
-
-        blob_path = f"InteligenciaFiscal/Apuracao/Tiquete/{payload.tiqueteSolicitacao}.json"
-        storage_client.upload_json(blob_path, payload_data, overwrite=True)
+        logger.info(
+            "Webhook recebido - tiqueteSolicitacao=%s tiqueteDownload=%s",
+            payload.tiqueteSolicitacao,
+            payload.tiqueteDownload,
+        )
 
         background_tasks.add_task(dispatch_download, payload.tiqueteDownload, payload.tiqueteSolicitacao)
 
         return {
-            "message": "Payload gravado com sucesso e download agendado.",
+            "message": "Webhook recebido com sucesso e download agendado.",
             "tiqueteSolicitacao": payload.tiqueteSolicitacao,
             "download_service_url": DOWNLOAD_SERVICE_URL,
         }

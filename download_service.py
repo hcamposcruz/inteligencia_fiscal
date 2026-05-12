@@ -11,7 +11,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field, validator
 
 from storage_client import BlobStorageClient
-from token import get_access_token
+from token_service import get_access_token
 
 logger = logging.getLogger("download_service")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
