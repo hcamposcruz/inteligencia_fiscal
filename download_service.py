@@ -119,7 +119,7 @@ class DownloadWorker:
             duration_seconds=duration,
         )
 
-    def download_stream(self, client: httpx.Client, url: str, blob_path: str) -> (int, Optional[str]):
+    def download_stream(self, client: httpx.Client, url: str, blob_path: str) -> tuple[int, Optional[str]]:
         blob_client = self.storage_client.container_client.get_blob_client(blob_path)
         hasher = hashlib.md5()
         total_bytes = 0
@@ -140,7 +140,7 @@ class DownloadWorker:
         self.storage_client.upload_stream(blob_path, content_generator())
         return total_bytes, hasher.hexdigest()
 
-    def download_with_range(self, client: httpx.Client, url: str, blob_path: str, content_length: int) -> (int, Optional[str]):
+    def download_with_range(self, client: httpx.Client, url: str, blob_path: str, content_length: int) -> tuple[int, Optional[str]]:
         blob_client = self.storage_client.container_client.get_blob_client(blob_path)
         hasher = hashlib.md5()
         block_ids = []
